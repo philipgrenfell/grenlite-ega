@@ -1,13 +1,14 @@
 import uvicorn
 from fastapi import FastAPI
 import httpx
+import os
 
 app = FastAPI()
 
 # Replace these with your own tenant and client credentials
 TENANT_ID = "000d9c9a-f008-4116-9dca-4579f2a629ab"
 CLIENT_ID = "435c0419-c254-4c6c-abff-c0fd7ff12064"
-CLIENT_SECRET = "nET8Q~Sh5KqzqCsWWQOaGhtM8wo7LWNLeDgHmbfr"
+CLIENT_SECRET = os.environ.get("CLIENT_SECRET")
 
 # The token endpoint for OAuth 2.0 client_credentials flow
 TOKEN_URL = f"https://login.microsoftonline.com/{TENANT_ID}/oauth2/v2.0/token"
