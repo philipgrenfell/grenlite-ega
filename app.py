@@ -1,5 +1,5 @@
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 import httpx
 import os
 
@@ -20,6 +20,7 @@ FOLDER_LIST_URL = (
     "lists/Documents/items?expand=fields"
 )
 
+
 @app.get("/folders")
 async def get_folders():
     """
@@ -27,29 +28,58 @@ async def get_folders():
     2. Pull folder items from Microsoft Graph.
     3. Build and return a nested folder hierarchy.
     """
-    # Step 1: Get an access token
-    form_data = {
-        "client_id": CLIENT_ID,
-        "client_secret": CLIENT_SECRET,
-        "scope": "https://graph.microsoft.com/.default",
-        "grant_type": "client_credentials",
-    }
+    access_token = await get_access_token()
 
-    async with httpx.AsyncClient() as client:
-        token_resp = await client.post(TOKEN_URL, data=form_data)
-        token_resp.raise_for_status()
-        access_token = token_resp.json()["access_token"]
-
-    # Step 2: Pull list items (folders) from Graph
     headers = {"Authorization": f"Bearer {access_token}"}
     async with httpx.AsyncClient() as client:
         folder_resp = await client.get(FOLDER_LIST_URL, headers=headers)
         folder_resp.raise_for_status()
         all_items = folder_resp.json().get("value", [])
 
-    # Step 3: Build hierarchy and return it
+    # Build the entire tree
     hierarchy = build_folder_hierarchy(all_items)
     return hierarchy
+
+
+@app.get("/subfolders/{server_id}")
+async def get_subfolders(server_id: str):
+    """
+    Given a unique 'server_id' (GUID from @odata.etag),
+    return the sub-tree for that folder. If not found, return 404.
+    """
+    access_token = await get_access_token()
+
+    headers = {"Authorization": f"Bearer {access_token}"}
+    async with httpx.AsyncClient() as client:
+        folder_resp = await client.get(FOLDER_LIST_URL, headers=headers)
+        folder_resp.raise_for_status()
+        all_items = folder_resp.json().get("value", [])
+
+    hierarchy = build_folder_hierarchy(all_items)
+
+    # Try to find the node matching the requested server_id
+    matching_node = find_folder_by_id_in_hierarchy(hierarchy, server_id)
+
+    if not matching_node:
+        raise HTTPException(status_code=404, detail="Folder not found.")
+
+    return matching_node
+
+
+async def get_access_token():
+    """
+    Helper function to fetch an OAuth2 token using client_credentials flow.
+    """
+    form_data = {
+        "client_id": CLIENT_ID,
+        "client_secret": CLIENT_SECRET,
+        "scope": "https://graph.microsoft.com/.default",
+        "grant_type": "client_credentials",
+    }
+    async with httpx.AsyncClient() as client:
+        token_resp = await client.post(TOKEN_URL, data=form_data)
+        token_resp.raise_for_status()
+        return token_resp.json()["access_token"]
 
 
 def build_folder_hierarchy(items):
@@ -57,42 +87,50 @@ def build_folder_hierarchy(items):
     Given a list of SharePoint 'items' (folders) from Graph,
     build a nested folder structure based on parentReference.id.
     """
-    # 1) Parse each item and store a node keyed by the "serverID" (from the etag).
-    #    We'll also store "parentID" from item["parentReference"]["id"] if present.
     nodes = {}
 
     for item in items:
-        # Example etag: "9935d002-1e2e-47d4-85d4-85a7deb48052,1"
         etag_str = item.get("@odata.etag", "")
-        # Remove surrounding quotes, then split on ',' to isolate the first GUID part
+        # Remove surrounding quotes, then split on ',' to isolate the GUID
         server_id = etag_str.strip('"').split(",")[0]
-        parent_id = item.get("parentReference", {}).get("id")  # This is the parent GUID
+        parent_id = item.get("parentReference", {}).get("id")  # The parent's GUID
 
         display_name = item.get("fields", {}).get("FileLeafRef")
-        # You can include other fields as needed — e.g., item IDs, Avaza_CompanyID, etc.
 
-        # Initialize a dict for this node
         nodes[server_id] = {
             "name": display_name,
             "serverID": server_id,
             "parentID": parent_id,
             "children": [],
-            "rawItem": item,  # Optional, if you need the raw data
+            "rawItem": item,  # if you need the raw data
         }
 
-    # 2) For each node, attach it to its parent (if the parent exists in the dictionary).
-    #    If parentID is not in nodes, that folder is top-level (root in this subset).
+    # Build the hierarchy
     roots = []
-    for server_id, node in nodes.items():
-        parent_id = node["parentID"]
-        if parent_id and parent_id in nodes:
-            # Attach this node to the parent's children
-            nodes[parent_id]["children"].append(node)
+    for sid, node in nodes.items():
+        pid = node["parentID"]
+        if pid and pid in nodes:
+            nodes[pid]["children"].append(node)
         else:
-            # This node is top-level in our hierarchy
+            # It's a top-level node
             roots.append(node)
 
     return roots
+
+
+def find_folder_by_id_in_hierarchy(tree, target_id: str):
+    """
+    Recursively search the hierarchy (list of root nodes) for a folder
+    whose 'serverID' matches 'target_id'. Return that node with children.
+    """
+    for node in tree:
+        if node["serverID"] == target_id:
+            return node
+        # Otherwise, search in children
+        result = find_folder_by_id_in_hierarchy(node["children"], target_id)
+        if result:
+            return result
+    return None
 
 
 if __name__ == "__main__":
