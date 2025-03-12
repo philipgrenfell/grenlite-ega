@@ -3,34 +3,29 @@ from fastapi import FastAPI, HTTPException, Query
 import httpx
 import os
 from pydantic import BaseModel
+from dotenv import load_dotenv
 
 app = FastAPI()
 
-# Replace these with your own tenant and client credentials
-TENANT_ID = "000d9c9a-f008-4116-9dca-4579f2a629ab"
-CLIENT_ID = "435c0419-c254-4c6c-abff-c0fd7ff12064"
-CLIENT_SECRET = os.environ.get("CLIENT_SECRET")
+# Load environment variables from a .env file
+load_dotenv()  # defaults to .env in current directory
+
+TENANT_ID = os.getenv("TENANT_ID")
+CLIENT_ID = os.getenv("CLIENT_ID")
+CLIENT_SECRET = os.getenv("CLIENT_SECRET")
+
+SITE_ID = os.getenv("SITE_ID")
+TEMPLATE_FOLDER_ID = os.getenv("TEMPLATE_FOLDER_ID")
+DOCUMENTS_DRIVE_ID = os.getenv("DOCUMENTS_DRIVE_ID")
+DOCS_LIST_ID = os.getenv("DOCS_LIST_ID")
 
 # The token endpoint for OAuth 2.0 client_credentials flow
 TOKEN_URL = f"https://login.microsoftonline.com/{TENANT_ID}/oauth2/v2.0/token"
-
-# SharePoint site and known "Documents" library IDs
-SITE_ID = "f09e9314-eee5-4148-8b51-7b7513684d40,c70bf214-5dc0-48ed-a0ec-edb1849fd9c9"
 
 # This is the API endpoint for retrieving the list of folders
 FOLDER_LIST_URL = (
     f"https://graph.microsoft.com/v1.0/sites/{SITE_ID}/lists/Documents/items?expand=fields"
 )
-
-# 1) The template folder's GUID (from the @odata.etag before the comma):
-TEMPLATE_FOLDER_ID = "dd821b0d-ac11-403c-8c6d-0671b43f1596"
-
-# 2) The driveId of the same "Documents" library. 
-#    You can hardcode it if you know it; or fetch it dynamically if needed.
-#    Example dynamic approach: GET /sites/{SITE_ID}/drives -> pick the drive with name "Documents"
-DOCUMENTS_DRIVE_ID = "b!FJOe8OXuSEGLUXt1E2hNQBTyC8fAXe1IoOztsYSf2clmFlb_1n-pQK1Z39W8oFNK" 
-
-DOCS_LIST_ID="ff561666-7fd6-40a9-ad59-dfd5bca0534a"
 
 @app.get("/folders")
 async def get_folders():
@@ -81,15 +76,6 @@ class FolderRequest(BaseModel):
     parent_folder_id: str  # The folder 'id' from your get_folders API (server_id)
     folder_name: str       # The name of the new folder
 
-# --- Models ---
-class FolderRequest(BaseModel):
-    parent_folder_id: str  # The folder 'id' (server_id) from get_folders
-    folder_name: str       # The name of the new folder
-
-class CopyFolderRequest(BaseModel):
-    # This is the ListItem "server ID" (from @odata.etag) of the destination folder
-    destination_server_id: str
-
 @app.post("/create_folder")
 async def create_folder(req: FolderRequest):
     """
@@ -119,6 +105,10 @@ async def create_folder(req: FolderRequest):
 
     # Return the newly created folder's metadata
     return response.json()
+
+class CopyFolderRequest(BaseModel):
+    # This is the ListItem "server ID" (from @odata.etag) of the destination folder
+    destination_server_id: str
 
 @app.post("/copy_template_folder")
 async def copy_template_folder(req: CopyFolderRequest):
@@ -200,7 +190,45 @@ async def copy_template_folder(req: CopyFolderRequest):
             response.raise_for_status()
             return response.json()
 
+@app.get("/folders_get_children/{server_id}")
+async def folders_get_children(server_id: str):
+    """
+    Return the *immediate* child folders (no files) whose parentID == server_id.
+    - 404 if the parent folder (server_id) doesn't exist.
+    - An empty list if it exists but has no child folders.
+    """
+    access_token = await get_access_token()
+    headers = {"Authorization": f"Bearer {access_token}"}
 
+    async with httpx.AsyncClient() as client:
+        # Fetch all items (files + folders) from the 'Documents' list
+        resp = await client.get(FOLDER_LIST_URL, headers=headers)
+        resp.raise_for_status()
+        all_items = resp.json().get("value", [])
+
+    # Helper to extract an item's serverID (from @odata.etag):
+    def extract_server_id(item):
+        etag_str = item.get("@odata.etag", "")
+        return etag_str.strip('"').split(",")[0]
+
+    # First, check if the parent folder actually exists
+    parent_exists = any(extract_server_id(item) == server_id for item in all_items)
+    if not parent_exists:
+        raise HTTPException(status_code=404, detail="Parent folder not found.")
+
+    # Filter for items whose parentReference.id == server_id
+    # AND is a folder (FSObjType == 1)
+    child_folders = []
+    for item in all_items:
+        parent_id = item.get("parentReference", {}).get("id")
+        print(parent_id)
+        if parent_id == server_id:
+            child_folders.append({
+                "name": item.get("fields", {}).get("FileLeafRef"),
+                "serverId": extract_server_id(item)
+            })
+
+    return child_folders
 
 async def get_access_token():
     """
