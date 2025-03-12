@@ -193,9 +193,14 @@ async def copy_template_folder(req: CopyFolderRequest):
 @app.get("/folders_get_children/{server_id}")
 async def folders_get_children(server_id: str):
     """
-    Return the *immediate* child folders (no files) whose parentID == server_id.
-    - 404 if the parent folder (server_id) doesn't exist.
-    - An empty list if it exists but has no child folders.
+    Return the following:
+      - queriedFolderParentId (the parent's server ID)
+      - queriedFolderParentName (the parent's display name)
+      - queriedFolderServerId (the current folder's server ID)
+      - queriedFolderName (the current folder's display name)
+      - childrenFolders (immediate child folders: name + serverId)
+    - Return 404 if the folder doesn't exist.
+    - Return an empty 'childrenFolders' list if no subfolders exist.
     """
     access_token = await get_access_token()
     headers = {"Authorization": f"Bearer {access_token}"}
@@ -206,29 +211,52 @@ async def folders_get_children(server_id: str):
         resp.raise_for_status()
         all_items = resp.json().get("value", [])
 
-    # Helper to extract an item's serverID (from @odata.etag):
+    # Helper to extract a serverId from @odata.etag
     def extract_server_id(item):
         etag_str = item.get("@odata.etag", "")
         return etag_str.strip('"').split(",")[0]
 
-    # First, check if the parent folder actually exists
-    parent_exists = any(extract_server_id(item) == server_id for item in all_items)
-    if not parent_exists:
-        raise HTTPException(status_code=404, detail="Parent folder not found.")
+    # 1) Locate the item corresponding to the queried folder
+    queried_item = next(
+        (item for item in all_items if extract_server_id(item) == server_id),
+        None
+    )
+    if not queried_item:
+        raise HTTPException(status_code=404, detail="Folder not found.")
 
-    # Filter for items whose parentReference.id == server_id
-    # AND is a folder (FSObjType == 1)
+    # 2) Extract the folder's own parent
+    queried_folder_parent_id = queried_item.get("parentReference", {}).get("id")
+    queried_folder_name = queried_item.get("fields", {}).get("FileLeafRef")
+
+    # 3) Locate the parent item (if any) to fetch its "name"
+    queried_folder_parent_name = None
+    if queried_folder_parent_id:
+        parent_item = next(
+            (item for item in all_items if extract_server_id(item) == queried_folder_parent_id),
+            None
+        )
+        if parent_item:
+            queried_folder_parent_name = parent_item.get("fields", {}).get("FileLeafRef")
+
+    # 4) Collect immediate child folders
     child_folders = []
     for item in all_items:
         parent_id = item.get("parentReference", {}).get("id")
-        print(parent_id)
         if parent_id == server_id:
             child_folders.append({
                 "name": item.get("fields", {}).get("FileLeafRef"),
                 "serverId": extract_server_id(item)
             })
 
-    return child_folders
+    # 5) Return the JSON in the requested format
+    return {
+        "queriedFolderParentId": queried_folder_parent_id,
+        "queriedFolderParentName": queried_folder_parent_name,
+        "queriedFolderServerId": server_id,
+        "queriedFolderName": queried_folder_name,
+        "childrenFolders": child_folders
+    }
+
 
 async def get_access_token():
     """
