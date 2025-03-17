@@ -4,7 +4,7 @@ import httpx
 import os
 from pydantic import BaseModel
 from dotenv import load_dotenv
-
+import base64
 app = FastAPI()
 
 # Load environment variables from a .env file
@@ -26,6 +26,52 @@ TOKEN_URL = f"https://login.microsoftonline.com/{TENANT_ID}/oauth2/v2.0/token"
 FOLDER_LIST_URL = (
     f"https://graph.microsoft.com/v1.0/sites/{SITE_ID}/lists/Documents/items?expand=fields"
 )
+
+# SharePoint file upload API template
+SHAREPOINT_UPLOAD_URL_TEMPLATE = (
+    "https://graph.microsoft.com/v1.0/sites/{site_id}/drives/{drive_id}/items/{parent_id}:/{file_name}:/content"
+)
+
+
+class FileUploadRequest(BaseModel):
+    file_name: str
+    server_id: str
+    file_data: str  # Base64-encoded file content
+
+@app.post("/upload_file")
+async def upload_file(request: FileUploadRequest):
+    """
+    Uploads a base64-encoded file to a given SharePoint folder (server_id).
+    """
+    access_token = await get_access_token()
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/octet-stream"
+    }
+
+    # Decode the base64 file content 
+    try:
+        file_content = base64.b64decode(request.file_data)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid base64 file data")
+
+    # Construct SharePoint file upload URL
+    upload_url = SHAREPOINT_UPLOAD_URL_TEMPLATE.format(
+        site_id=SITE_ID,
+        drive_id=DOCUMENTS_DRIVE_ID,    
+        parent_id=request.server_id,
+        file_name=request.file_name
+    )
+
+    # Upload the file to SharePoint
+    async with httpx.AsyncClient() as client:
+        response = await client.put(upload_url, headers=headers, content=file_content)
+
+    if response.status_code not in (200, 201):
+        raise HTTPException(status_code=response.status_code, detail=response.text)
+
+    return {"message": "File uploaded successfully", "file_url": response.json().get("webUrl")}
+
 
 @app.get("/folders")
 async def get_folders():
