@@ -190,7 +190,7 @@ async def copy_template_folder(req: CopyFolderRequest):
             response.raise_for_status()
             return response.json()
 
-@app.get("/folders_get_children/{server_id}")
+@app.get("/folders_get_children/{server_id}") #update to only return folders.
 async def folders_get_children(server_id: str):
     """
     Return the following:
@@ -242,7 +242,10 @@ async def folders_get_children(server_id: str):
     child_folders = []
     for item in all_items:
         parent_id = item.get("parentReference", {}).get("id")
-        if parent_id == server_id:
+        content_type = item.get("fields", {}).get("ContentType")
+        # print(item)
+        # print("fields \n", item.get("fields", {}).get("ContentType"))
+        if parent_id == server_id and content_type == "Folder":
             child_folders.append({
                 "name": item.get("fields", {}).get("FileLeafRef"),
                 "serverId": extract_server_id(item)
@@ -292,7 +295,7 @@ def build_folder_hierarchy(items):
         nodes[server_id] = {
             "name": display_name,
             "serverID": server_id,
-            "parentID": parent_id,
+            "parentID": parent_id,  
             "children": [],
             "rawItem": item,  # if you need the raw data
         }
