@@ -5,8 +5,12 @@ import os
 from pydantic import BaseModel
 from dotenv import load_dotenv
 import base64
-from io import BytesIO
+from io import BytesIO, StringIO
 from pypdf import PdfReader, PdfWriter
+from datetime import datetime, timedelta
+import csv
+from fastapi.responses import StreamingResponse
+from typing import List, Dict, Any
 
 app = FastAPI()
 
@@ -56,6 +60,25 @@ class CombinePDFRequest(BaseModel):
     Word-doc-conversion PDF.
     """
     pdf_to_append_b64: str
+
+class TimeEntry(BaseModel):
+    total_time: float
+    type: str
+
+class TimesheetEntry(BaseModel):
+    client: str
+    project_number: str
+    date: str
+    employee_first_name: str
+    employee_last_name: str
+    employee_email: str
+    employee_unique_id: str
+    time_entries: List[TimeEntry]
+
+class TimesheetRequest(BaseModel):
+    start_date: str
+    end_date: str
+    timesheets: List[TimesheetEntry]
 
 # ================================
 # Main Endpoints
@@ -290,7 +313,8 @@ async def folders_get_children(server_id: str):
                 "name": item.get("fields", {}).get("FileLeafRef"),
                 "serverId": extract_server_id(item)
             })
-
+    
+    child_folders.sort(key=lambda x: x["name"].lower())
     # 5) Return
     return {
         "queriedFolderParentId": queried_folder_parent_id,
@@ -424,9 +448,105 @@ async def convert_doc_to_pdf(server_id: str, req: CombinePDFRequest):
     # 8) Return the final PDF + the new SharePoint file URL
     return {
         "combined_pdf_base64": final_pdf_base64,
-        "local_saved_file": local_filename,
         "sharepoint_file_url": sharepoint_file_url
     }
+
+@app.post("/process_timesheets")
+async def process_timesheets(request: TimesheetRequest):
+    """
+    Process timesheet JSON and return a CSV with employee details, client info,
+    and daily hours for each date in the specified range.
+    """
+    try:
+        # Parse start and end dates
+        start_date = datetime.strptime(request.start_date, "%d-%b-%Y")
+        end_date = datetime.strptime(request.end_date, "%d-%b-%Y")
+        
+        # Generate all dates between start and end
+        date_range = []
+        current_date = start_date
+        while current_date <= end_date:
+            date_range.append(current_date.strftime("%d-%b-%Y"))
+            current_date += timedelta(days=1)
+        
+        # Process timesheets data
+        employee_data = {}
+        
+        for timesheet in request.timesheets:
+            # Create unique key for each employee-client-project combination
+            key = (
+                timesheet.employee_first_name,
+                timesheet.employee_last_name,
+                timesheet.employee_email,
+                timesheet.client,
+                timesheet.project_number
+            )
+            
+            if key not in employee_data:
+                employee_data[key] = {
+                    "employee_first_name": timesheet.employee_first_name,
+                    "employee_last_name": timesheet.employee_last_name,
+                    "employee_email": timesheet.employee_email,
+                    "client_name": timesheet.client,
+                    "job_number": timesheet.project_number,
+                    "daily_hours": {date: 0.0 for date in date_range},
+                    "total_hours": 0.0
+                }
+            
+            # Sum up time entries for this timesheet entry - only "EGA Consultant" type
+            daily_total = sum(entry.total_time for entry in timesheet.time_entries if entry.type == "EGA Consultant")
+            
+            # Only process if there are EGA Consultant hours
+            if daily_total > 0:
+                # Normalize the timesheet date to match our date range format
+                timesheet_date = datetime.strptime(timesheet.date, "%d-%b-%Y").strftime("%d-%b-%Y")
+                
+                # Add to the appropriate date
+                if timesheet_date in employee_data[key]["daily_hours"]:
+                    employee_data[key]["daily_hours"][timesheet_date] += daily_total
+                    employee_data[key]["total_hours"] += daily_total
+        
+        # Generate CSV content
+        output = StringIO()
+        writer = csv.writer(output)
+        
+        # Write header
+        header = [
+            "employee_first_name",
+            "employee_last_name", 
+            "employee_email",
+            "client_name",
+            "job_number"
+        ] + date_range + ["total_hours"]
+        
+        writer.writerow(header)
+        
+        # Write data rows
+        for employee in employee_data.values():
+            row = [
+                employee["employee_first_name"],
+                employee["employee_last_name"],
+                employee["employee_email"],
+                employee["client_name"],
+                employee["job_number"]
+            ] + [employee["daily_hours"][date] for date in date_range] + [employee["total_hours"]]
+            
+            writer.writerow(row)
+        
+        # Prepare response
+        output.seek(0)
+        csv_content = output.getvalue()
+        
+        return StreamingResponse(
+            BytesIO(csv_content.encode('utf-8')),
+            media_type="text/csv",
+            headers={"Content-Disposition": "attachment; filename=timesheets.csv"}
+        )
+        
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"Date parsing error: {str(e)}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error processing timesheets: {str(e)}")
 
 # ================================
 # Utilities
