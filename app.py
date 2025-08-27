@@ -11,6 +11,11 @@ from datetime import datetime, timedelta
 import csv
 from fastapi.responses import StreamingResponse
 from typing import List, Dict, Any
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
@@ -457,6 +462,11 @@ async def process_timesheets(request: TimesheetRequest):
     Process timesheet JSON and return a CSV with employee details, client info,
     and daily hours for each date in the specified range.
     """
+    # Log the incoming request for debugging
+    logger.info(f"Received timesheet request: start_date={request.start_date}, end_date={request.end_date}")
+    logger.info(f"Number of timesheets: {len(request.timesheets)}")
+    logger.info(f"Full request data: {request.model_dump()}")
+    
     try:
         # Parse start and end dates
         start_date = datetime.strptime(request.start_date, "%d-%b-%Y")
