@@ -85,6 +85,9 @@ class TimesheetRequest(BaseModel):
     end_date: str
     timesheets: List[TimesheetEntry]
 
+class DeleteFileRequest(BaseModel):
+    file_url: str  # The webUrl returned from upload_file endpoint
+
 # ================================
 # Main Endpoints
 # ================================
@@ -121,6 +124,65 @@ async def upload_file(request: FileUploadRequest):
         raise HTTPException(status_code=response.status_code, detail=response.text)
 
     return {"message": "File uploaded successfully", "file_url": response.json().get("webUrl")}
+
+
+@app.post("/delete_file")
+async def delete_file(request: DeleteFileRequest):
+    """
+    Deletes a file from SharePoint using the file_url (webUrl) returned from upload_file.
+    """
+    access_token = await get_access_token()
+    headers = {"Authorization": f"Bearer {access_token}"}
+    
+    try:
+        # Extract the file path from the webUrl
+        # webUrl format: https://{tenant}.sharepoint.com/sites/{site}/Shared%20Documents/{path}/{filename}
+        # We need to convert this to a Graph API path
+        
+        # Parse the URL to extract the relative path
+        from urllib.parse import urlparse, unquote
+        parsed_url = urlparse(request.file_url)
+        
+        # Extract the path after "Shared Documents" or "Documents"
+        path_parts = unquote(parsed_url.path).split('/')
+        
+        # Find the index of "Documents" in the path
+        docs_index = -1
+        for i, part in enumerate(path_parts):
+            if part in ["Documents", "Shared%20Documents", "Shared Documents"]:
+                docs_index = i
+                break
+        
+        if docs_index == -1:
+            raise HTTPException(status_code=400, detail="Invalid file URL format - could not find Documents folder")
+        
+        # Get the relative path after Documents
+        relative_path = '/'.join(path_parts[docs_index + 1:])
+        
+        if not relative_path:
+            raise HTTPException(status_code=400, detail="Invalid file URL - no file path found")
+        
+        # Construct the Graph API delete URL
+        delete_url = f"https://graph.microsoft.com/v1.0/sites/{SITE_ID}/drives/{DOCUMENTS_DRIVE_ID}/root:/{relative_path}"
+        
+        logger.info(f"Attempting to delete file at: {delete_url}")
+        
+        # Delete the file
+        async with httpx.AsyncClient() as client:
+            response = await client.delete(delete_url, headers=headers)
+            
+            if response.status_code == 204:
+                return {"message": "File deleted successfully", "file_url": request.file_url}
+            elif response.status_code == 404:
+                raise HTTPException(status_code=404, detail="File not found")
+            else:
+                response.raise_for_status()
+                
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting file: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error deleting file: {str(e)}")
 
 
 @app.get("/folders")
