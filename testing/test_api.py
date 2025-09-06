@@ -11,6 +11,9 @@ from app import app
 # The PDF file to append:
 PDF_TO_APPEND_PATH = "./testing/test_doc.pdf"
 
+# The DOCX file for upload/delete tests:
+DOCX_TEST_PATH = "./testing/test-upload.docx"
+
 # A real server ID from SharePoint referencing a DOC file:
 SERVER_ID = "e69033db-d82b-413f-a29b-6abf946564bf"
 
@@ -77,64 +80,133 @@ def test_convert_doc_to_pdf_integration(client):
 
 
 @pytest.mark.integration
-def test_upload_and_delete_file_integration(client):
+def test_upload_file_integration(client):
     """
     Integration test that:
-    1) Uploads a test PDF file to SharePoint using the upload_file endpoint
-    2) Verifies the upload was successful and gets the file_url
-    3) Deletes the uploaded file using the delete_file endpoint
-    4) Verifies the deletion was successful
+    1) Uploads test PDF and DOCX files to SharePoint using the upload_file endpoint
+    2) Verifies the uploads were successful and gets the file_urls
+    3) Writes the base64 encoded file data to txt files for verification
     """
     
-    # 1) Prepare test file for upload
-    if not os.path.exists(PDF_TO_APPEND_PATH):
-        pytest.fail(f"Cannot find test PDF file for upload: {PDF_TO_APPEND_PATH}")
+    # Test files to upload
+    test_files = [
+        {"path": PDF_TO_APPEND_PATH, "type": "pdf"},
+        {"path": DOCX_TEST_PATH, "type": "docx"}
+    ]
     
-    with open(PDF_TO_APPEND_PATH, "rb") as f:
-        test_file_bytes = f.read()
-    test_file_b64 = base64.b64encode(test_file_bytes).decode("utf-8")
+    for test_file in test_files:
+        file_path = test_file["path"]
+        file_type = test_file["type"]
+        
+        print(f"\n--- Testing {file_type.upper()} file upload ---")
+        
+        # 1) Prepare test file for upload
+        if not os.path.exists(file_path):
+            pytest.fail(f"Cannot find test {file_type} file for upload: {file_path}")
+        
+        with open(file_path, "rb") as f:
+            test_file_bytes = f.read()
+        test_file_b64 = base64.b64encode(test_file_bytes).decode("utf-8")
+        
+        # Write base64 encoded file as txt
+        base64_output_file = f"./testing/test_upload_{file_type}_base64_{int(time.time())}.txt"
+        with open(base64_output_file, "w") as f:
+            f.write(test_file_b64)
+        print(f"Base64 encoded {file_type} file written to: {base64_output_file}")
+        
+        # Generate a unique filename for this test
+        test_filename = f"test_upload_{file_type}_{int(time.time())}.{file_type}"
+        
+        # 2) Upload the file
+        upload_payload = {
+            "file_name": test_filename,
+            "server_id": UPLOAD_SERVER_ID,
+            "file_data": test_file_b64
+        }
+        
+        print(f"Uploading test {file_type} file: {test_filename}")
+        upload_response = client.post("/upload_file", json=upload_payload)
+        
+        # 3) Verify upload was successful
+        assert upload_response.status_code == 200, f"{file_type.upper()} upload failed with status: {upload_response.status_code}"
+        upload_data = upload_response.json()
+        
+        assert "message" in upload_data, f"{file_type.upper()} upload response should contain 'message'"
+        assert "file_url" in upload_data, f"{file_type.upper()} upload response should contain 'file_url'"
+        assert upload_data["message"] == "File uploaded successfully"
+        
+        file_url = upload_data["file_url"]
+        print(f"{file_type.upper()} file uploaded successfully. URL: {file_url}")
     
-    # Generate a unique filename for this test
-    test_filename = f"test_upload_delete_{int(time.time())}.pdf"
+    print("\nIntegration test passed: Both PDF and DOCX files were successfully uploaded.")
+
+
+@pytest.mark.integration
+def test_delete_file_integration(client):
+    """
+    Integration test that:
+    1) Uploads test PDF and DOCX files to SharePoint first
+    2) Deletes the uploaded files using the delete_file endpoint
+    3) Verifies the deletions were successful
+    """
     
-    # 2) Upload the file
-    upload_payload = {
-        "file_name": test_filename,
-        "server_id": UPLOAD_SERVER_ID,
-        "file_data": test_file_b64
-    }
+    # Test files to upload and then delete
+    test_files = [
+        {"path": PDF_TO_APPEND_PATH, "type": "pdf"},
+        {"path": DOCX_TEST_PATH, "type": "docx"}
+    ]
     
-    print(f"Uploading test file: {test_filename}")
-    upload_response = client.post("/upload_file", json=upload_payload)
+    for test_file in test_files:
+        file_path = test_file["path"]
+        file_type = test_file["type"]
+        
+        print(f"\n--- Testing {file_type.upper()} file deletion ---")
+        
+        # 1) First upload a file to have something to delete
+        if not os.path.exists(file_path):
+            pytest.fail(f"Cannot find test {file_type} file for upload: {file_path}")
+        
+        with open(file_path, "rb") as f:
+            test_file_bytes = f.read()
+        test_file_b64 = base64.b64encode(test_file_bytes).decode("utf-8")
+        
+        # Generate a unique filename for this test
+        test_filename = f"test_delete_{file_type}_{int(time.time())}.{file_type}"
+        
+        # Upload the file first
+        upload_payload = {
+            "file_name": test_filename,
+            "server_id": UPLOAD_SERVER_ID,
+            "file_data": test_file_b64
+        }
+        
+        print(f"Uploading test {file_type} file for deletion: {test_filename}")
+        upload_response = client.post("/upload_file", json=upload_payload)
+        
+        assert upload_response.status_code == 200, f"{file_type.upper()} upload failed with status: {upload_response.status_code}"
+        upload_data = upload_response.json()
+        file_url = upload_data["file_url"]
+        print(f"{file_type.upper()} file uploaded successfully for deletion test. URL: {file_url}")
+        
+        # 2) Delete the uploaded file
+        delete_payload = {
+            "file_url": file_url
+        }
+        
+        print(f"Deleting uploaded {file_type} file: {file_url}")
+        delete_response = client.post("/delete_file", json=delete_payload)
+        
+        # 3) Verify deletion was successful
+        assert delete_response.status_code == 200, f"{file_type.upper()} delete failed with status: {delete_response.status_code}"
+        delete_data = delete_response.json()
+        
+        assert "message" in delete_data, f"{file_type.upper()} delete response should contain 'message'"
+        assert delete_data["message"] == "File deleted successfully"
+        assert delete_data["file_url"] == file_url, f"{file_type.upper()} delete response should return the same file_url"
+        
+        print(f"{file_type.upper()} file was successfully deleted.")
     
-    # 3) Verify upload was successful
-    assert upload_response.status_code == 200, f"Upload failed with status: {upload_response.status_code}"
-    upload_data = upload_response.json()
-    
-    assert "message" in upload_data, "Upload response should contain 'message'"
-    assert "file_url" in upload_data, "Upload response should contain 'file_url'"
-    assert upload_data["message"] == "File uploaded successfully"
-    
-    file_url = upload_data["file_url"]
-    print(f"File uploaded successfully. URL: {file_url}")
-    
-    # 4) Delete the uploaded file
-    delete_payload = {
-        "file_url": file_url
-    }
-    
-    print(f"Deleting uploaded file: {file_url}")
-    delete_response = client.post("/delete_file", json=delete_payload)
-    
-    # 5) Verify deletion was successful
-    assert delete_response.status_code == 200, f"Delete failed with status: {delete_response.status_code}"
-    delete_data = delete_response.json()
-    
-    assert "message" in delete_data, "Delete response should contain 'message'"
-    assert delete_data["message"] == "File deleted successfully"
-    assert delete_data["file_url"] == file_url, "Delete response should return the same file_url"
-    
-    print("Integration test passed: File was successfully uploaded and then deleted.")
+    print("\nIntegration test passed: Both PDF and DOCX files were successfully deleted.")
 
 
 @pytest.mark.integration

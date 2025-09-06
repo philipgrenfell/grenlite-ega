@@ -123,49 +123,85 @@ async def upload_file(request: FileUploadRequest):
     if response.status_code not in (200, 201):
         raise HTTPException(status_code=response.status_code, detail=response.text)
 
-    return {"message": "File uploaded successfully", "file_url": response.json().get("webUrl")}
+    response_data = response.json()
+    
+    # Store the item ID for reliable deletion and construct a standard URL
+    item_id = response_data.get("id")
+    
+    # Get the parent path and filename to construct a consistent URL
+    parent_reference = response_data.get("parentReference", {})
+    parent_path = parent_reference.get("path", "").replace("/drive/root:", "")
+    file_name = response_data.get("name", request.file_name)
+    
+    # Construct a standard SharePoint document library URL format
+    # This format works for deletion regardless of file type
+    if parent_path:
+        file_path = f"{parent_path}/{file_name}"
+    else:
+        file_path = file_name
+    
+    # Remove leading slash if present
+    if file_path.startswith("/"):
+        file_path = file_path[1:]
+    
+    # Return both the constructed path and item ID for deletion
+    # We'll embed the item_id in a way that delete can extract it
+    file_url = f"item_id:{item_id}|path:{file_path}"
+
+    return {"message": "File uploaded successfully", "file_url": file_url}
 
 
 @app.post("/delete_file")
 async def delete_file(request: DeleteFileRequest):
     """
-    Deletes a file from SharePoint using the file_url (webUrl) returned from upload_file.
+    Deletes a file from SharePoint using the file_url returned from upload_file.
+    Supports both new item_id format and legacy webUrl format.
     """
     access_token = await get_access_token()
     headers = {"Authorization": f"Bearer {access_token}"}
     
     try:
-        # Extract the file path from the webUrl
-        # webUrl format: https://{tenant}.sharepoint.com/sites/{site}/Shared%20Documents/{path}/{filename}
-        # We need to convert this to a Graph API path
+        delete_url = None
         
-        # Parse the URL to extract the relative path
-        from urllib.parse import urlparse, unquote
-        parsed_url = urlparse(request.file_url)
-        
-        # Extract the path after "Shared Documents" or "Documents"
-        path_parts = unquote(parsed_url.path).split('/')
-        
-        # Find the index of "Documents" in the path
-        docs_index = -1
-        for i, part in enumerate(path_parts):
-            if part in ["Documents", "Shared%20Documents", "Shared Documents"]:
-                docs_index = i
-                break
-        
-        if docs_index == -1:
-            raise HTTPException(status_code=400, detail="Invalid file URL format - could not find Documents folder")
-        
-        # Get the relative path after Documents
-        relative_path = '/'.join(path_parts[docs_index + 1:])
-        
-        if not relative_path:
-            raise HTTPException(status_code=400, detail="Invalid file URL - no file path found")
-        
-        # Construct the Graph API delete URL
-        delete_url = f"https://graph.microsoft.com/v1.0/sites/{SITE_ID}/drives/{DOCUMENTS_DRIVE_ID}/root:/{relative_path}"
-        
-        logger.info(f"Attempting to delete file at: {delete_url}")
+        # Check if this is the new format with item_id
+        if request.file_url.startswith("item_id:"):
+            # Extract item_id from the new format
+            parts = request.file_url.split("|")
+            item_id = parts[0].replace("item_id:", "")
+            
+            # Use the item ID for direct deletion - more reliable
+            delete_url = f"https://graph.microsoft.com/v1.0/sites/{SITE_ID}/drives/{DOCUMENTS_DRIVE_ID}/items/{item_id}"
+            
+            logger.info(f"Attempting to delete file by item ID: {item_id}")
+            
+        else:
+            # Legacy webUrl format - parse the URL to extract the relative path
+            from urllib.parse import urlparse, unquote
+            parsed_url = urlparse(request.file_url)
+            
+            # Extract the path after "Shared Documents" or "Documents"
+            path_parts = unquote(parsed_url.path).split('/')
+            
+            # Find the index of "Documents" in the path
+            docs_index = -1
+            for i, part in enumerate(path_parts):
+                if part in ["Documents", "Shared%20Documents", "Shared Documents"]:
+                    docs_index = i
+                    break
+            
+            if docs_index == -1:
+                raise HTTPException(status_code=400, detail="Invalid file URL format - could not find Documents folder")
+            
+            # Get the relative path after Documents
+            relative_path = '/'.join(path_parts[docs_index + 1:])
+            
+            if not relative_path:
+                raise HTTPException(status_code=400, detail="Invalid file URL - no file path found")
+            
+            # Construct the Graph API delete URL
+            delete_url = f"https://graph.microsoft.com/v1.0/sites/{SITE_ID}/drives/{DOCUMENTS_DRIVE_ID}/root:/{relative_path}"
+            
+            logger.info(f"Attempting to delete file at path: {relative_path}")
         
         # Delete the file
         async with httpx.AsyncClient() as client:
@@ -176,6 +212,7 @@ async def delete_file(request: DeleteFileRequest):
             elif response.status_code == 404:
                 raise HTTPException(status_code=404, detail="File not found")
             else:
+                logger.error(f"Delete failed with status {response.status_code}: {response.text}")
                 response.raise_for_status()
                 
     except HTTPException:
