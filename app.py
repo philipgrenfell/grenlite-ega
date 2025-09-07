@@ -86,7 +86,7 @@ class TimesheetRequest(BaseModel):
     timesheets: List[TimesheetEntry]
 
 class DeleteFileRequest(BaseModel):
-    file_url: str  # The webUrl returned from upload_file endpoint
+    file_url: str  # The delete_url returned from upload_file endpoint (or legacy webUrl for backward compatibility)
 
 # ================================
 # Main Endpoints
@@ -144,11 +144,41 @@ async def upload_file(request: FileUploadRequest):
     if file_path.startswith("/"):
         file_path = file_path[1:]
     
-    # Return both the constructed path and item ID for deletion
-    # We'll embed the item_id in a way that delete can extract it
-    file_url = f"item_id:{item_id}|path:{file_path}"
+    # Get the direct webUrl from SharePoint response
+    direct_web_url = response_data.get("webUrl")
+    
+    # Construct SharePoint viewer URL that opens in browser instead of downloading
+    if direct_web_url:
+        from urllib.parse import urlparse, quote, unquote
+        
+        # Get file extension to determine viewer URL format
+        file_extension = file_name.lower().split('.')[-1] if '.' in file_name else ''
+        
+        if file_extension in ['docx', 'doc', 'xlsx', 'xls', 'pptx', 'ppt']:
+            # For Office documents, SharePoint already returns the correct viewer URL
+            viewer_url = direct_web_url
+        else:
+            # For other files (like PDFs), modify the URL to open in browser view
+            parsed_url = urlparse(direct_web_url)
+            
+            # Check if it's already a viewer URL, if not, add web=1 parameter
+            if '?web=' not in direct_web_url and '&web=' not in direct_web_url:
+                separator = '&' if '?' in direct_web_url else '?'
+                viewer_url = f"{direct_web_url}{separator}web=1"
+            else:
+                viewer_url = direct_web_url
+    else:
+        # Construct fallback URL if webUrl is not available
+        viewer_url = f"https://graph.microsoft.com/v1.0/sites/{SITE_ID}/drives/{DOCUMENTS_DRIVE_ID}/items/{item_id}"
+    
+    # Create internal file_url for deletion (with item_id)
+    internal_file_url = f"item_id:{item_id}|path:{file_path}"
 
-    return {"message": "File uploaded successfully", "file_url": file_url}
+    return {
+        "message": "File uploaded successfully", 
+        "file_url": viewer_url,  # SharePoint viewer URL that opens in browser
+        "delete_url": internal_file_url  # Internal URL for deletion
+    }
 
 
 @app.post("/delete_file")
@@ -546,7 +576,7 @@ async def convert_doc_to_pdf(server_id: str, req: CombinePDFRequest):
     # We call our existing /upload_file function *directly*. 
     # This is an async function, so we must await it.
     upload_response = await upload_file(upload_request_data)
-    # e.g. upload_response -> { "message": "...", "file_url": "<SharePoint link>" }
+    # e.g. upload_response -> { "message": "...", "file_url": "<clickable SharePoint link>", "delete_url": "<internal ID>" }
     sharepoint_file_url = upload_response.get("file_url", None)
 
     # 8) Return the final PDF + the new SharePoint file URL

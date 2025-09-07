@@ -133,10 +133,14 @@ def test_upload_file_integration(client):
         
         assert "message" in upload_data, f"{file_type.upper()} upload response should contain 'message'"
         assert "file_url" in upload_data, f"{file_type.upper()} upload response should contain 'file_url'"
+        assert "delete_url" in upload_data, f"{file_type.upper()} upload response should contain 'delete_url'"
         assert upload_data["message"] == "File uploaded successfully"
         
         file_url = upload_data["file_url"]
-        print(f"{file_type.upper()} file uploaded successfully. URL: {file_url}")
+        delete_url = upload_data["delete_url"]
+        print(f"{file_type.upper()} file uploaded successfully.")
+        print(f"Access URL: {file_url}")
+        print(f"Delete URL: {delete_url}")
     
     print("\nIntegration test passed: Both PDF and DOCX files were successfully uploaded.")
 
@@ -186,14 +190,17 @@ def test_delete_file_integration(client):
         assert upload_response.status_code == 200, f"{file_type.upper()} upload failed with status: {upload_response.status_code}"
         upload_data = upload_response.json()
         file_url = upload_data["file_url"]
-        print(f"{file_type.upper()} file uploaded successfully for deletion test. URL: {file_url}")
+        delete_url = upload_data["delete_url"]
+        print(f"{file_type.upper()} file uploaded successfully for deletion test.")
+        print(f"Access URL: {file_url}")
+        print(f"Delete URL: {delete_url}")
         
-        # 2) Delete the uploaded file
+        # 2) Delete the uploaded file using the delete_url
         delete_payload = {
-            "file_url": file_url
+            "file_url": delete_url  # Using delete_url for deletion
         }
         
-        print(f"Deleting uploaded {file_type} file: {file_url}")
+        print(f"Deleting uploaded {file_type} file using delete_url...")
         delete_response = client.post("/delete_file", json=delete_payload)
         
         # 3) Verify deletion was successful
@@ -202,7 +209,7 @@ def test_delete_file_integration(client):
         
         assert "message" in delete_data, f"{file_type.upper()} delete response should contain 'message'"
         assert delete_data["message"] == "File deleted successfully"
-        assert delete_data["file_url"] == file_url, f"{file_type.upper()} delete response should return the same file_url"
+        assert delete_data["file_url"] == delete_url, f"{file_type.upper()} delete response should return the same delete_url"
         
         print(f"{file_type.upper()} file was successfully deleted.")
     
